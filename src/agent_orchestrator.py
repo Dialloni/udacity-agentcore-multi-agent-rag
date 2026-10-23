@@ -960,31 +960,84 @@ def create_guardrail() -> tuple[str, str]:
             print(f"Guardrail already exists: {guardrail_id} (version: {guardrail_version})")
             return guardrail_id, guardrail_version
 
-    # TODO: Create the guardrail
-    # Use bedrock_client.create_guardrail() with:
-    #   - name (config.GUARDRAIL_NAME) and description
-    #   - contentPolicyConfig - filtersConfig for SEXUAL, VIOLENCE, HATE at HIGH
-    #     strength and INSULTS, MISCONDUCT at MEDIUM strength (input + output)
-    #   - sensitiveInformationPolicyConfig - piiEntitiesConfig:
-    #       CREDIT_DEBIT_CARD_NUMBER and US_SOCIAL_SECURITY_NUMBER -> BLOCK
-    #       EMAIL and PHONE -> ANONYMIZE
-    #   - topicPolicyConfig - one DENY topic per entry in config.GUARDRAIL_BLOCKED_TOPICS
-    #     (competitor products, pricing negotiations, legal threats)
-    #     Use topicPolicyConfig.tierConfig = {'tierName': 'STANDARD'} and
-    #     top-level crossRegionConfig = {'guardrailProfileIdentifier': 'us.guardrail.v1:0'}.
-    #     Define pricing negotiations as haggling / changing an advertised price,
-    #     excluding arithmetic using an already-specified price and discount.
-    #     Classic-tier definitions tested in this project blocked the math scenario.
-    #     Validate allowed arithmetic (input and output) and blocked negotiation,
-    #     competitor and legal-threat requests. Keep all required safety policies.
-    #   - wordPolicyConfig - managedWordListsConfig with type PROFANITY
-    #   - blockedInputMessaging and blockedOutputsMessaging
-    #
-    # Then promote it from DRAFT to a numbered version with
-    # bedrock_client.create_guardrail_version(guardrailIdentifier=...)
-    # and return (guardrail_id, guardrail_version).
+    filter_strengths = {
+        'SEXUAL': 'HIGH', 'VIOLENCE': 'HIGH', 'HATE': 'HIGH',
+        'INSULTS': 'MEDIUM', 'MISCONDUCT': 'MEDIUM',
+    }
+    # One DENY topic per config.GUARDRAIL_BLOCKED_TOPICS entry.
+    topic_definitions = {
+        'competitor products': {
+            'name': 'Competitor-Products',
+            'definition': ("Requests to discuss, compare, recommend or promote products, "
+                           "prices or services of retailers other than NovaMart."),
+            'examples': [
+                "Is Amazon cheaper than NovaMart for these headphones?",
+                "Should I buy this laptop from Best Buy instead?",
+                "Which competitor store has a better return policy?",
+            ],
+        },
+        'pricing negotiations': {
+            'name': 'Pricing-Negotiations',
+            'definition': ("Haggling, bargaining or asking NovaMart to lower, match or "
+                           "otherwise change an advertised price or grant an unadvertised "
+                           "discount. Excludes arithmetic that only uses an already "
+                           "specified price and discount, such as computing a total."),
+            'examples': [
+                "Can you give me a better price on this laptop?",
+                "I'll buy it today if you knock 20% off the price.",
+                "Will you price match if I find it cheaper elsewhere?",
+            ],
+        },
+        'legal threats': {
+            'name': 'Legal-Threats',
+            'definition': ("Threats of lawsuits, legal action, attorneys or regulatory "
+                           "complaints directed at NovaMart or its staff."),
+            'examples': [
+                "I'm going to sue NovaMart if I don't get my refund.",
+                "My lawyer will be contacting you about this order.",
+                "I will take legal action against your company.",
+            ],
+        },
+    }
 
-    pass
+    response = bedrock_client.create_guardrail(
+        name=config.GUARDRAIL_NAME,
+        description=("NovaMart customer-support guardrail: blocks harmful content, "
+                     "sensitive PII, off-limits topics and profanity."),
+        contentPolicyConfig={'filtersConfig': [
+            {'type': ftype, 'inputStrength': strength, 'outputStrength': strength}
+            for ftype, strength in filter_strengths.items()
+        ]},
+        sensitiveInformationPolicyConfig={'piiEntitiesConfig': [
+            {'type': 'CREDIT_DEBIT_CARD_NUMBER',  'action': 'BLOCK'},
+            {'type': 'US_SOCIAL_SECURITY_NUMBER', 'action': 'BLOCK'},
+            {'type': 'EMAIL',                     'action': 'ANONYMIZE'},
+            {'type': 'PHONE',                     'action': 'ANONYMIZE'},
+        ]},
+        topicPolicyConfig={
+            'topicsConfig': [
+                {**topic_definitions[topic], 'type': 'DENY'}
+                for topic in config.GUARDRAIL_BLOCKED_TOPICS
+            ],
+            'tierConfig': {'tierName': 'STANDARD'},
+        },
+        crossRegionConfig={'guardrailProfileIdentifier': 'us.guardrail.v1:0'},
+        wordPolicyConfig={'managedWordListsConfig': [{'type': 'PROFANITY'}]},
+        blockedInputMessaging=("Sorry, I can't help with that request. I'm happy to help "
+                               "with your NovaMart orders, returns, shipping or warranty."),
+        blockedOutputsMessaging=("Sorry, I'm unable to provide that response. Please contact "
+                                 "NovaMart Customer Support if you need further help."),
+    )
+    guardrail_id = response['guardrailId']
+    print(f"Guardrail created: {guardrail_id} (DRAFT)")
+
+    version = bedrock_client.create_guardrail_version(
+        guardrailIdentifier=guardrail_id,
+        description='Initial published version',
+    )
+    guardrail_version = version['version']
+    print(f"Guardrail version published: {guardrail_version}")
+    return guardrail_id, guardrail_version
 
 
 def deploy_to_agentcore_runtime(
@@ -1025,21 +1078,28 @@ def deploy_to_agentcore_runtime(
     # Stage the code the CLI packages (src modules + config.py + pyproject.toml).
     agentcore_cli.stage_runtime_code()
 
-    # TODO: Configure and deploy the runtime with the AgentCore CLI
-    # 1. Build the runtime environment variables dict `runtime_env` with:
-    #      AWS_REGION, PROJECT_NAME (config.AWS_REGION / config.PROJECT_NAME),
-    #      RETURNS_KB_ID, SHIPPING_KB_ID, WARRANTY_KB_ID (from config),
-    #      AGENT_LOG_GROUP (config.AGENT_LOG_GROUP), and the guardrail
-    #      (GUARDRAIL_ID = guardrail_id, GUARDRAIL_VERSION = guardrail_version)
-    # 2. Write the runtime settings to agentcore/agentcore.json with
-    #      agentcore_cli.configure_runtime(env_vars=runtime_env,
-    #                                      network_mode='PUBLIC',
-    #                                      protocol='HTTP',
-    #                                      execution_role_arn=config.AGENTCORE_ROLE_ARN)
-    # 3. Deploy:  agentcore_cli.deploy()        (runs `agentcore deploy -y`)
-    # 4. Read the ARN the CLI recorded:
-    #      runtime_arn = agentcore_cli.deployed_runtime_arn()
-    runtime_arn = None
+    runtime_env = {
+        'AWS_REGION':        config.AWS_REGION,
+        'PROJECT_NAME':      config.PROJECT_NAME,
+        'RETURNS_KB_ID':     config.RETURNS_KB_ID,
+        'SHIPPING_KB_ID':    config.SHIPPING_KB_ID,
+        'WARRANTY_KB_ID':    config.WARRANTY_KB_ID,
+        'AGENT_LOG_GROUP':   config.AGENT_LOG_GROUP,
+        'GUARDRAIL_ID':      guardrail_id,
+        'GUARDRAIL_VERSION': guardrail_version,
+    }
+    missing = [k for k, v in runtime_env.items() if not v]
+    if missing:
+        print(f"  [Warning] Empty runtime environment variables (skipped): {', '.join(missing)}")
+
+    agentcore_cli.configure_runtime(
+        env_vars=runtime_env,
+        network_mode='PUBLIC',
+        protocol='HTTP',
+        execution_role_arn=config.AGENTCORE_ROLE_ARN,
+    )
+    agentcore_cli.deploy()
+    runtime_arn = agentcore_cli.deployed_runtime_arn()
 
     if not runtime_arn:
         raise NotImplementedError("deploy_to_agentcore_runtime: AgentCore CLI deployment not implemented")
